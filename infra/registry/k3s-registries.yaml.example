@@ -1,0 +1,14 @@
+# Copy this to /etc/rancher/k3s/registries.yaml on the single k3s node,
+# replacing the hostname with the same private REGISTRY_HOST used by install.sh.
+mirrors:
+  "registry.internal.example:30500":
+    endpoint:
+      - "http://registry.internal.example:30500"
+
+# HTTP is for a private lab network only. For a real server, use https:// and
+# configure the CA under configs for the exact host:port key.
+# configs:
+#   "registry.internal.example:30500":
+#     tls:
+#       ca_file: /etc/rancher/k3s/registry-ca.pem
+

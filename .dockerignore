@@ -1,0 +1,16 @@
+.git
+.gitignore
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules
+**/node_modules
+dist
+**/dist
+coverage
+*.log
+*.pptx
+*.pdf
+infra/k3d/kubeconfig
+.runtime

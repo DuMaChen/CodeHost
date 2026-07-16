@@ -1,0 +1,1 @@
+ALTER TABLE "workflow_outbox" ADD CONSTRAINT "workflow_outbox_dedupe_key_format_ck" CHECK ("workflow_outbox"."dedupe_key" = "workflow_outbox"."run_id"::text || ':' || "workflow_outbox"."step_key" || ':' || "workflow_outbox"."attempt"::text);
