@@ -10,3 +10,6 @@ coverage/
 *.local
 
 .pnpm-store/
+
+.DS_Store
+.embeddedskills/
