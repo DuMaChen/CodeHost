@@ -67,5 +67,3 @@ Kubernetes YAML。
 - [威胁模型](docs/threat-model.md)
 - [Demo 脚本](docs/demo.md)
 - [验证记录](docs/verification.md)
-- [发布流程](RELEASE.md)
-- [变更记录](CHANGELOG.md)
