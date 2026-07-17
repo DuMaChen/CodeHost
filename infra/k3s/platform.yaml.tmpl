@@ -1,0 +1,1243 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform-system
+  labels:
+    app.kubernetes.io/part-of: ai-native-pr-platform
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: platform-local-path
+  labels:
+    app.kubernetes.io/part-of: ai-native-pr-platform
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: platform-run-local-path
+  labels:
+    app.kubernetes.io/part-of: ai-native-pr-platform
+    platform.io/retention: delete
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: platform-runtime
+  namespace: platform-system
+type: Opaque
+stringData:
+  postgres-password: "${POSTGRES_PASSWORD}"
+  db-password: "${POSTGRES_PASSWORD}"
+  database-url: "${DATABASE_URL}"
+  gitea-webhook-secret: "${GITEA_WEBHOOK_SECRET}"
+  session-encryption-key: "${SESSION_ENCRYPTION_KEY}"
+  gitea-runner-token: "${GITEA_RUNNER_TOKEN}"
+  gitea-oauth-client-id: "${GITEA_OAUTH_CLIENT_ID}"
+  gitea-oauth-client-secret: "${GITEA_OAUTH_CLIENT_SECRET}"
+  gitea-platform-token: "${GITEA_PLATFORM_TOKEN}"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-config
+  namespace: platform-system
+data:
+  AGENT_PROVIDER: ${AGENT_PROVIDER}
+  K8S_MODE: server
+  WORKFLOW_EXECUTOR: kubernetes
+  K8S_STORAGE_CLASS: platform-run-local-path
+  K8S_JOB_TIMEOUT_MS: ${K8S_JOB_TIMEOUT_MS}
+  K8S_RUNNER_IMAGE: ${PLATFORM_RUNNER_IMAGE}
+  K8S_PREVIEW_IMAGE: ${PLATFORM_PREVIEW_IMAGE}
+  PREVIEW_MODE: ${PREVIEW_MODE}
+  PREVIEW_BASE_URL: "${PREVIEW_BASE_URL}"
+  PREVIEW_TLS_SECRET_NAME: "${PREVIEW_TLS_SECRET_NAME}"
+  PREVIEW_SSH_HOST: "${PREVIEW_SSH_HOST}"
+  PREVIEW_SSH_USER: "${PREVIEW_SSH_USER}"
+  PREVIEW_SSH_PORT: "${PREVIEW_SSH_PORT}"
+  GITEA_BASE_URL: http://gitea.platform-system.svc.cluster.local:3000
+  GITEA_RUNNER_BASE_URL: http://gitea.platform-system.svc.cluster.local:3000
+  GITEA_PUBLIC_URL: https://${GITEA_HOST}
+  PLATFORM_PUBLIC_URL: ${PLATFORM_PUBLIC_URL}
+  REGISTRY_PUSH_HOST: ${REGISTRY_PUSH_HOST}
+  REGISTRY_PULL_HOST: ${REGISTRY_PULL_HOST}
+  REGISTRY_API_URL: ${REGISTRY_API_URL}
+  AGENT_REVIEW_URL: http://platform-agent-review:3002
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-web-nginx
+  namespace: platform-system
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name _;
+      root /usr/share/nginx/html;
+      index index.html;
+      location /api/ {
+        proxy_pass http://platform-api:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      }
+      location /auth/ {
+        proxy_pass http://platform-api:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      }
+      location / {
+        try_files $uri $uri/ /index.html;
+      }
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: platform-postgres
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: postgres
+    platform.io/retention: retain
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: platform-local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: platform-gitea
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: gitea
+    platform.io/retention: retain
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: platform-local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: platform-registry
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: registry
+    platform.io/retention: retain
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: platform-local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: platform-logs
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-logs
+    platform.io/retention: retain
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: platform-local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-config
+  namespace: platform-system
+data:
+  config.yml: |
+    version: 0.1
+    log:
+      level: info
+      fields:
+        service: registry
+    storage:
+      filesystem:
+        rootdirectory: /var/lib/registry
+      delete:
+        enabled: true
+    http:
+      addr: :5000
+      headers:
+        X-Content-Type-Options: [nosniff]
+    health:
+      storagedriver:
+        enabled: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: postgres
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-postgres
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: ai-native-pr-platform
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: ai-native-pr-platform
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: postgres
+          image: postgres:16.6-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 70
+            runAsGroup: 70
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: POSTGRES_DB
+              value: platform
+            - name: POSTGRES_USER
+              value: platform
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: postgres-password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "platform", "-d", "platform"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "platform", "-d", "platform"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: platform-postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: gitea
+spec:
+  selector:
+    app.kubernetes.io/name: gitea
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+    - name: ssh
+      port: 2222
+      targetPort: ssh
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-gitea
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: gitea
+    app.kubernetes.io/part-of: ai-native-pr-platform
+    platform.io/start-phase: runtime
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitea
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gitea
+        app.kubernetes.io/part-of: ai-native-pr-platform
+    spec:
+      serviceAccountName: platform-app
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: migration-gate
+          image: ${PLATFORM_API_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "--input-type=module", "-e"]
+          args:
+            - |
+              import pg from "pg";
+              const deadline = Date.now() + 300000;
+              while (Date.now() < deadline) {
+                const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+                try {
+                  await client.connect();
+                  await client.query("select 1 from drizzle.__drizzle_migrations limit 1");
+                  await client.end();
+                  process.exit(0);
+                } catch (error) {
+                  await client.end().catch(() => {});
+                  await new Promise((resolve) => setTimeout(resolve, 2000));
+                }
+              }
+              console.error("database migrations did not become ready before the deadline");
+              process.exit(1);
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: database-url
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      containers:
+        - name: gitea
+          image: gitea/gitea:1.22.6-rootless
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: USER_UID
+              value: "1000"
+            - name: USER_GID
+              value: "1000"
+            - name: GITEA__database__DB_TYPE
+              value: postgres
+            - name: GITEA__database__HOST
+              value: postgres:5432
+            - name: GITEA__database__NAME
+              value: platform
+            - name: GITEA__database__USER
+              value: platform
+            - name: GITEA__database__PASSWD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: db-password
+            - name: GITEA__security__INSTALL_LOCK
+              value: "true"
+            - name: GITEA__server__DOMAIN
+              value: ${GITEA_HOST}
+            - name: GITEA__server__ROOT_URL
+              value: https://${GITEA_HOST}/
+            - name: GITEA__server__HTTP_PORT
+              value: "3000"
+            - name: GITEA__server__SSH_PORT
+              value: "2222"
+            - name: GITEA__server__SSH_LISTEN_PORT
+              value: "2222"
+            - name: GITEA__webhook__ALLOWED_HOST_LIST
+              value: private
+          ports:
+            - name: http
+              containerPort: 3000
+            - name: ssh
+              containerPort: 2222
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/gitea
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: platform-gitea
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: platform-migrate
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-migrate
+    app.kubernetes.io/part-of: ai-native-pr-platform
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform-migrate
+        app.kubernetes.io/part-of: ai-native-pr-platform
+    spec:
+      serviceAccountName: platform-app
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: postgres-ready
+          image: postgres:16.6-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - >-
+              until pg_isready -h postgres -p 5432 -U platform -d platform;
+              do sleep 2; done
+          securityContext:
+            runAsUser: 70
+            runAsGroup: 70
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      containers:
+        - name: migrate
+          image: ${PLATFORM_API_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: ["node", "packages/db/dist/migrate.js"]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: database-url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: registry
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: registry
+      nodePort: 30500
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-registry
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: registry
+    app.kubernetes.io/part-of: ai-native-pr-platform
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: registry
+        app.kubernetes.io/part-of: ai-native-pr-platform
+    spec:
+      serviceAccountName: platform-app
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: registry
+          image: registry:2.8.3
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/registry", "serve", "/etc/docker/registry/config.yml"]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: registry
+              containerPort: 5000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+            - name: config
+              mountPath: /etc/docker/registry/config.yml
+              subPath: config.yml
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: platform-registry
+        - name: config
+          configMap:
+            name: registry-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-api
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-api
+spec:
+  selector:
+    app.kubernetes.io/name: platform-api
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-api
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-api
+    app.kubernetes.io/part-of: ai-native-pr-platform
+    platform.io/start-phase: runtime
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: platform-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform-api
+        app.kubernetes.io/part-of: ai-native-pr-platform
+    spec:
+      serviceAccountName: platform-app
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 1000
+      initContainers:
+        - name: migration-gate
+          image: ${PLATFORM_API_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "--input-type=module", "-e"]
+          args:
+            - |
+              import pg from "pg";
+              const deadline = Date.now() + 300000;
+              while (Date.now() < deadline) {
+                const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+                try {
+                  await client.connect();
+                  await client.query("select 1 from drizzle.__drizzle_migrations limit 1");
+                  await client.end();
+                  process.exit(0);
+                } catch (error) {
+                  await client.end().catch(() => {});
+                  await new Promise((resolve) => setTimeout(resolve, 2000));
+                }
+              }
+              console.error("database migrations did not become ready before the deadline");
+              process.exit(1);
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: database-url
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      containers:
+        - name: api
+          image: ${PLATFORM_API_IMAGE}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: database-url
+            - name: GITEA_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: gitea-webhook-secret
+            - name: SESSION_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: session-encryption-key
+            - name: GITEA_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: gitea-oauth-client-id
+            - name: GITEA_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: gitea-oauth-client-secret
+          envFrom:
+            - configMapRef:
+                name: platform-config
+          ports:
+            - name: http
+              containerPort: 3000
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/platform
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: logs
+          persistentVolumeClaim:
+            claimName: platform-logs
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-web
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-web
+spec:
+  selector:
+    app.kubernetes.io/name: platform-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-web
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-web
+    app.kubernetes.io/part-of: ai-native-pr-platform
+    platform.io/start-phase: runtime
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: platform-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform-web
+        app.kubernetes.io/part-of: ai-native-pr-platform
+    spec:
+      serviceAccountName: platform-app
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: api-ready-gate
+          image: ${PLATFORM_API_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "--input-type=module", "-e"]
+          args:
+            - |
+              const deadline = Date.now() + 300000;
+              while (Date.now() < deadline) {
+                try {
+                  const response = await fetch("http://platform-api:3000/readyz");
+                  if (response.ok) process.exit(0);
+                } catch {}
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+              console.error("platform API did not become ready before the deadline");
+              process.exit(1);
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      containers:
+        - name: web
+          image: ${PLATFORM_WEB_IMAGE}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+            - name: tmp
+              mountPath: /var/cache/nginx
+            - name: run
+              mountPath: /var/run
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: platform-web-nginx
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: run
+          emptyDir:
+            sizeLimit: 16Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-worker
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-worker
+    app.kubernetes.io/part-of: ai-native-pr-platform
+    platform.io/start-phase: runtime
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: platform-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform-worker
+        app.kubernetes.io/part-of: ai-native-pr-platform
+    spec:
+      serviceAccountName: platform-worker
+      automountServiceAccountToken: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 1000
+      initContainers:
+        - name: api-ready-gate
+          image: ${PLATFORM_API_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "--input-type=module", "-e"]
+          args:
+            - |
+              const deadline = Date.now() + 300000;
+              while (Date.now() < deadline) {
+                try {
+                  const response = await fetch("http://platform-api:3000/readyz");
+                  if (response.ok) process.exit(0);
+                } catch {}
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+              console.error("platform API did not become ready before the deadline");
+              process.exit(1);
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      containers:
+        - name: worker
+          image: ${PLATFORM_WORKER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "apps/worker/dist/main.js"]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3001"
+            - name: WORKER_HEALTH_PORT
+              value: "3001"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: database-url
+            - name: GITEA_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: gitea-webhook-secret
+            - name: SESSION_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: session-encryption-key
+            - name: GITEA_RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: gitea-runner-token
+            - name: GITEA_PLATFORM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: platform-runtime
+                  key: gitea-platform-token
+          envFrom:
+            - configMapRef:
+                name: platform-config
+          ports:
+            - name: health
+              containerPort: 3001
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/platform
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: logs
+          persistentVolumeClaim:
+            claimName: platform-logs
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-agent-review
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-agent-review
+spec:
+  selector:
+    app.kubernetes.io/name: platform-agent-review
+  ports:
+    - name: http
+      port: 3002
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-agent-review
+  namespace: platform-system
+  labels:
+    app.kubernetes.io/name: platform-agent-review
+    app.kubernetes.io/part-of: ai-native-pr-platform
+    platform.io/start-phase: runtime
+spec:
+  replicas: ${AGENT_REPLICAS}
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: platform-agent-review
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform-agent-review
+        app.kubernetes.io/part-of: ai-native-pr-platform
+    spec:
+      serviceAccountName: platform-agent
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 1000
+      initContainers:
+        - name: api-ready-gate
+          image: ${PLATFORM_API_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "--input-type=module", "-e"]
+          args:
+            - |
+              const deadline = Date.now() + 300000;
+              while (Date.now() < deadline) {
+                try {
+                  const response = await fetch("http://platform-api:3000/readyz");
+                  if (response.ok) process.exit(0);
+                } catch {}
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+              console.error("platform API did not become ready before the deadline");
+              process.exit(1);
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      containers:
+        - name: agent-review
+          image: ${PLATFORM_AGENT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "apps/agent-review/dist/main.js"]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: AGENT_PROVIDER
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: AGENT_PROVIDER
+            - name: AGENT_MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-model-api
+                  key: api-key
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 3002
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: platform
+  namespace: platform-system
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - ${PLATFORM_HOST}
+        - ${GITEA_HOST}
+      secretName: ${PLATFORM_TLS_SECRET_NAME}
+  rules:
+    - host: ${PLATFORM_HOST}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: platform-web
+                port:
+                  name: http
+    - host: ${GITEA_HOST}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gitea
+                port:
+                  name: http

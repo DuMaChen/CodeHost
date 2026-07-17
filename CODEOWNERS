@@ -1,0 +1,4 @@
+# Repository administrators must map this team to the actual maintainer group.
+# Keep ownership broad enough to require review for all course-version changes.
+* @project-maintainers
+

@@ -1,0 +1,1 @@
+ALTER TABLE "run_steps" ADD COLUMN "failure_kind" varchar(64);

@@ -1,0 +1,26 @@
+{
+  "name": "ai-native-pr-quality-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-native PR quality and Kubernetes preview platform for invited course repositories",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build": "pnpm --filter @platform/contracts build && pnpm --filter @platform/config build && pnpm --filter @platform/db build && pnpm --filter @platform/agent build && pnpm --filter @platform/k8s build && pnpm --filter @platform/agent-review build && pnpm --filter @platform/web build && pnpm --filter @platform/api build && pnpm --filter @platform/worker build",
+    "dev": "pnpm --filter @platform/api dev",
+    "lint": "pnpm --filter @platform/contracts lint && pnpm --filter @platform/config lint && pnpm --filter @platform/db lint && pnpm --filter @platform/agent typecheck && pnpm --filter @platform/k8s typecheck && pnpm --filter @platform/agent-review lint && pnpm --filter @platform/web typecheck && pnpm --filter @platform/api lint && pnpm --filter @platform/worker lint",
+    "test": "pnpm build && pnpm --filter @platform/contracts test && pnpm --filter @platform/config test && pnpm --filter @platform/agent test && pnpm --filter @platform/k8s test && pnpm --filter @platform/agent-review test && pnpm --filter @platform/web test && pnpm --filter @platform/api test && pnpm --filter @platform/worker test",
+    "test:integration": "pnpm build && pnpm --filter @platform/api test:e2e",
+    "test:e2e": "pnpm test:integration",
+    "typecheck": "pnpm --filter @platform/contracts typecheck && pnpm --filter @platform/config typecheck && pnpm --filter @platform/db typecheck && pnpm --filter @platform/agent typecheck && pnpm --filter @platform/k8s typecheck && pnpm --filter @platform/agent-review typecheck && pnpm --filter @platform/web typecheck && pnpm --filter @platform/api typecheck && pnpm --filter @platform/worker typecheck",
+    "ci": "pnpm typecheck && pnpm test",
+    "db:generate": "pnpm --filter @platform/db db:generate",
+    "db:migrate": "pnpm --filter @platform/db db:migrate"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

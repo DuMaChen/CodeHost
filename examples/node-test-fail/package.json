@@ -1,0 +1,8 @@
+{
+  "name": "course-node-test-fail",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node test-fail.js"
+  }
+}
