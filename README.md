@@ -1,71 +1,229 @@
-# AI-Native PR Quality Platform
+# CodeHost
 
-基于 Gitea 的 AI 原生 PR 质量与 Kubernetes 临时预览平台。Gitea 负责仓库、Issue、PR、Review、权限和分支保护；本平台负责把一次 PR 变更送入固定的测试、安全检查、临时预览和结构化 Agent 审查流程。
+AI 原生的 Pull Request 质量与 Kubernetes 临时预览平台。
 
-## 课程版边界
+CodeHost 以 Gitea 作为代码托管和协作入口，以 Kubernetes 运行受控的测试与预览任务，再由 Agent 根据代码变更、测试结果、安全扫描和运行日志生成结构化审查报告。它面向课程演示和受邀团队，不是 GitHub 的替代品，也不是生产级不可信代码沙箱。
 
-本项目面向受邀学生团队、教师或项目维护者，以及非敏感的课程示例仓库。课程版是一个可重复演示的 MVP，不是 GitHub 替代品，也不是生产级代码托管系统或不可信代码沙箱。
-
-课程版 P0 闭环如下：
+## 核心闭环
 
 ```text
-PR -> Gitea Webhook -> 固定 Profile 与测试/安全检查
-   -> 单次 Run 的 Kubernetes 临时环境 -> Agent 结构化报告
-   -> Gitea Status/Comment -> 人工 Review -> 合并或阻断 -> 自动清理
+创建或更新 PR
+    -> Gitea Pull Request Webhook
+    -> API 校验签名并创建 Run
+    -> detect -> fetch -> analyze -> test
+    -> build -> preview -> health
+    -> assemble-review-input -> agent-review -> report
+    -> 回写 Commit Status 和 PR Comment
+    -> 人工 Review 后合并
+    -> 清理临时 Namespace、Job 和 PVC
 ```
 
-P0 只支持 Node.js 和 Python 固定 Profile、单容器单 HTTP 端口、平台生成的受控 Dockerfile、固定测试、Gitleaks、临时 Preview、Mock Agent、Gitea 状态回写和人工批准。用户不能提交或执行任意 Dockerfile、Shell 或 Kubernetes YAML。
+平台审查发生在合并之前。Agent 只生成审查建议，最终合并由 Gitea 分支保护和人工 Reviewer 共同决定。
 
-明确不属于课程版的能力包括：公网任意仓库、多租户生产隔离、对抗容器逃逸、Agent 自动改代码或自动合并、任意命令生成、GPU/本地大模型、多节点 k3s、HA、自动扩缩容、计费和跨集群。真实模型 API、Go、Trivy、网络策略安全模式和高级预览域名属于 P1 或可选演示能力。
+## 当前版本
 
-> 安全承诺：本项目面向受邀学生团队和非敏感课程代码，提供受限的 Kubernetes 任务执行环境，不适用于生产环境或公共不可信代码。
+课程版 P0 支持：
 
-## 部署模式
+- Node.js `node-http` 和 Python `python-http` 两种固定 Profile。
+- 单容器、单 HTTP 端口、平台生成的受控 Dockerfile。
+- 固定测试、Gitleaks 安全扫描、Kubernetes 临时 Preview 和健康检查。
+- 结构化 Agent Review、Finding、PR 评论和 Commit Status 回写。
+- 每个 Run 独立 Namespace、ResourceQuota、LimitRange、临时 PVC 和自动清理。
+- 本地 Docker Compose + k3d，以及单节点 k3s 服务器部署。
 
-- 本地开发：Docker Compose 运行 Gitea、PostgreSQL、平台服务和 Agent；k3d 运行每次 Run 的任务与 Preview。
-- 服务器演示：单节点 k3s + Traefik + 本地 Registry。Gitea、PostgreSQL、Registry、平台服务、Agent Pod 和每次 Run 的资源可以运行在同一个 Node 上。
-- 单节点没有高可用能力；Node 宕机会使整个平台不可用。推荐服务器为 8 vCPU、16 GB RAM、80-100 GB SSD，并为 k3s 系统组件预留至少 20% 资源。
+默认 Agent Provider 为 `mock`，适合无 GPU 的课程演示。使用 Mock Agent 证明的是完整审查工作流，不代表已经调用外部大模型服务。
 
-### 多 Agent Pod 的含义
+课程版不包含公网任意仓库、多租户生产隔离、容器逃逸对抗、Agent 自动修改代码、自动合并、多节点高可用、GPU 推理和计费系统。
 
-服务器默认运行 1 个 `agent-review` Pod，推荐配置最多 3 个。多个 Pod 可以在同一个 Node 上运行，它们从同一个 review 队列领取不同的 Run，是无状态的容量副本；它们不执行用户代码、不访问 Kubernetes API、不读取 Sandbox Secret，也不为同一个 PR 生成多份聚合报告。课程版完整 Run 同时最多 1 个，最多 3 个 Run 排队；超出容量的 Webhook 记录为 `REJECTED_BY_CAPACITY`。
+## Demo 快速开始
 
-## 关键组件
+### 前置条件
 
-- Gitea：仓库、PR、Review、OAuth、权限和分支保护。
-- API：接收签名 Webhook、OAuth 和运行查询；Webhook 只入库并返回 `202`。
-- PostgreSQL + pg-boss：保存 Run、步骤、报告、审计记录和可靠任务队列；Outbox 防止 Worker 崩溃造成任务丢失。
-- Worker：编排固定工作流、创建和清理 Run Namespace、回写 Gitea 状态。
-- Kubernetes Run 资源：Source Fetch、Analysis Tools、Build/Test、Preview 和每 Run 独立的 workspace PVC。
-- `agent-review` Deployment：只处理脱敏且限长的输入，默认使用 Mock Provider，输出必须通过严格 Schema 校验。
+- Gitea 中已有一个受邀仓库和 `main` 分支。
+- 仓库配置了有效的 Gitea Webhook、Webhook Secret 和 Pull Request 事件。
+- 服务器模式下，Gitea、API、Worker、Agent Review、PostgreSQL、Registry 和 k3s 已运行。
+- 本地需要 Git；不需要启动本机 Docker，服务器模式的任务运行在远程 k3s。
 
-## 示例仓库
+### Webhook 配置
 
-`examples/node-good`、`examples/node-test-fail`、`examples/python-good` 和
-`examples/python-health-fail` 是无公网依赖的课程 Fixture。平台只从 Gitea
-仓库树识别受限的 `node-http` 或 `python-http` Profile，并把端口、健康路径、
-测试 Profile 和入口文件写入运行计划；不接受仓库自带 Dockerfile、Shell 或
-Kubernetes YAML。
+在 Gitea 仓库进入 `Settings -> Webhooks -> Add Webhook -> Gitea`，配置：
 
-## 运行前提
+```text
+Target URL:      http://platform-api:3000/webhooks/gitea
+Content Type:    application/json
+Secret:          与平台的 GITEA_WEBHOOK_SECRET 完全一致
+Events:          Pull Request、Pull Request Sync
+Active:          enabled
+```
 
-本地开发需要 Docker、Node.js 22 LTS、pnpm、kubectl 和 k3d；完整演示建议至少 4 核 CPU、16 GB 内存和 80 GB 可用磁盘。服务器模式需要单节点 k3s、Ingress 地址或 SSH 隧道，以及私有 Registry 配置。
+这里的 URL 是 Gitea Pod 访问平台 API 的集群内地址，不能填写用户电脑上的 `localhost`。
 
-实现后的启动、环境变量、迁移、测试和清理约定见 [DEVELOPMENT.md](DEVELOPMENT.md)。架构和边界见 [docs/architecture.md](docs/architecture.md)，威胁与残余风险见 [docs/threat-model.md](docs/threat-model.md)，答辩路径见 [docs/demo.md](docs/demo.md)。
-当前构建、测试、远程运行边界和未闭合验收项见 [docs/verification.md](docs/verification.md)。
+Webhook 配置完成后，在 `Recent Deliveries` 中应看到 `HTTP 202 Accepted`。如果只勾选了 Push 事件，PR 不会触发平台审查。
+
+### 创建一次成功 PR
+
+示例仓库需要在根目录具有 `package.json` + `server.js`，或者 `requirements.txt` + `main.py`。平台只识别仓库根目录，不会自动识别嵌套子目录中的项目。
+
+```bash
+git clone http://<gitea-host>/<owner>/<repo>.git
+cd <repo>
+git switch -c demo/review-smoke
+
+printf '\n<!-- review smoke test -->\n' >> README.md
+npm test                         # Node 示例
+
+git add README.md
+git commit -m "test: verify automated PR review"
+git push -u origin demo/review-smoke
+```
+
+然后在 Gitea 创建从 `demo/review-smoke` 到 `main` 的 Pull Request。平台会自动执行 Run，并在 PR 页面回写：
+
+```text
+platform/test
+platform/build
+platform/security
+platform/preview
+platform/quality-review
+```
+
+测试失败时，可以推送空提交重新触发已存在 PR 的 `synchronize` 事件：
+
+```bash
+git commit --allow-empty -m "chore: retrigger platform review"
+git push
+```
+
+### 查看审查证据
+
+在 PR 的对话页面查看质量审查评论；在最新提交详情查看五个 `platform/*` Commit Status。每个 Status 必须绑定当前 PR 的最新 head SHA。
+
+完整运行记录还包括 Run ID、步骤时间线、报告摘要、Finding、Preview 引用和清理结果。服务器模式没有稳定域名时，可以使用 SSH 隧道访问 Gitea：
+
+```text
+本机 13082 -> 远程 Gitea NodePort 30082
+本机 13080 -> 远程 API NodePort 30080
+本机 13081 -> 远程 Web NodePort 30081
+```
+
+## 架构
+
+```mermaid
+flowchart LR
+  G[Gitea PR] -->|signed webhook| A[Platform API]
+  A --> D[(PostgreSQL)]
+  A --> Q[Outbox / pg-boss]
+  Q --> W[Worker]
+  W --> K[Kubernetes Run Namespace]
+  K --> T[Test / Security / Preview]
+  W --> R[Agent Review]
+  R --> W
+  W -->|Status + Comment| G
+```
+
+### 主要组件
+
+| 组件 | 责任 |
+| --- | --- |
+| Gitea | 仓库、分支、PR、权限、Review、分支保护 |
+| API | Webhook 签名校验、Run 查询、OAuth 和管理操作 |
+| PostgreSQL | Run、步骤、报告、审计和可靠队列数据 |
+| Worker | 工作流编排、Kubernetes 资源生命周期和 Gitea 回写 |
+| Kubernetes | 每个 Run 的 Job、Preview、Service、PVC 和隔离 Namespace |
+| Agent Review | 接收脱敏证据，输出严格 Schema 的结构化报告 |
+| Registry | 保存固定基础镜像和受控的临时镜像 |
+
+## 本地开发
+
+本地环境由 Docker Compose 承载 Gitea、PostgreSQL、Registry、API、Worker、Web 和 Agent Review，k3d 承载每个 Run 的 Kubernetes 资源。
+
+```bash
+corepack enable
+pnpm install --frozen-lockfile
+
+infra/k3d/bootstrap.sh
+docker compose up -d postgres gitea registry
+docker compose --profile migration run --rm migrate
+docker compose up -d api worker web agent-review
+```
+
+验证代码和配置：
+
+```bash
+pnpm typecheck
+pnpm test
+docker compose config --quiet
+```
+
+## 服务器部署
+
+服务器演示使用单节点 k3s。推荐 8 vCPU、16 GiB RAM、80-100 GiB SSD，并为 k3s 系统组件预留至少 20% CPU 和内存。
+
+```bash
+cp infra/k3s/.env.example /tmp/platform-k3s.env
+# 编辑 Registry、域名、镜像 Digest 和敏感值
+set -a
+. /tmp/platform-k3s.env
+set +a
+infra/k3s/install.sh
+```
+
+安装脚本会先应用 RBAC 和基础 PVC，等待 PostgreSQL 迁移 Job 完成，再滚动 API、Worker、Agent Review 和 Web。完整配置见 [infra/k3s/README.md](infra/k3s/README.md) 和 [docs/deployment.md](docs/deployment.md)。
+
+常用检查命令：
+
+```bash
+kubectl get nodes
+kubectl -n platform-system get pods,pvc
+kubectl -n platform-system logs deploy/platform-worker --tail=200
+kubectl get events -A --sort-by='.lastTimestamp'
+```
+
+如果 k3s 运行在 Docker 容器内，则使用：
+
+```bash
+docker exec ai-platform-k3s-rootful kubectl get nodes
+docker exec ai-platform-k3s-rootful kubectl -n platform-system get pods
+```
+
+基础服务的 Gitea、PostgreSQL、Registry 和平台日志使用保留型 PVC；每个 Run 的 workspace PVC 随 Namespace 清理。清理或升级前应先备份平台 PVC。
 
 ## 验收口径
 
-课程版达到 MVP 的最低条件是：Node 成功 PR、Node 测试失败 PR、Gitea 质量门禁、Agent 结构化报告、独立 Namespace、持久化、自动清理和人工批准能够在选定部署路径重复运行。若 rootless BuildKit POC 未通过，动态构建必须降为 P1，验收使用固定预构建 Fixture 镜像，并在结果中标注 `BUILD_MODE=FIXTURE`；不得借此宣称完整动态构建安全性。
+一次成功验收至少应证明：
 
-## 文档
+1. Node 或 Python PR 能被 Webhook 接收并创建 Run。
+2. `detect`、`fetch`、`analyze`、`test`、`build`、`preview`、`health` 和 Agent Review 能形成可追踪结果。
+3. Gitea 收到五个当前 head SHA 对应的成功 Status 和质量评论。
+4. PR 在人工批准前不能合并，批准后才能合并。
+5. Run Namespace、Job、Preview 和 workspace PVC 能自动清理。
+6. 测试失败时能阻断合并，同时保留失败原因和清理结果。
+
+固定 Fixture 构建模式必须标注 `BUILD_MODE=FIXTURE`，不能将其描述为已经完成任意代码的动态安全构建。
+
+## 故障排查
+
+| 现象 | 优先检查 |
+| --- | --- |
+| PR 没有任何 Status | Webhook 是否启用 Pull Request 和 Pull Request Sync，Recent Deliveries 是否为 202 |
+| Webhook 返回 401 | Secret 是否与平台 `GITEA_WEBHOOK_SECRET` 完全一致 |
+| Webhook 返回连接错误 | URL 是否使用 `http://platform-api:3000/webhooks/gitea`，平台 API 是否 Running |
+| Run 为 `UNSUPPORTED_PROFILE` | 根目录是否包含受支持的入口文件，不能只在子目录中放项目 |
+| Run 卡在测试或 Preview | 查看 Worker 日志、Run Namespace、Job、Pod 事件和 Registry 拉取结果 |
+| PR 页面访问不了 | 检查 SSH 隧道和对应 NodePort；本机 Docker 是否关闭不影响远程服务器 |
+| 旧成功状态没有更新 | 确认状态绑定的是最新 head SHA，并向 PR 分支推送新提交触发 synchronize |
+
+## 项目文档
 
 - [开发指南](DEVELOPMENT.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
-- [架构](docs/architecture.md)
+- [系统架构](docs/architecture.md)
 - [威胁模型](docs/threat-model.md)
-- [Demo 脚本](docs/demo.md)
+- [课程 Demo 脚本](docs/demo.md)
+- [部署说明](docs/deployment.md)
 - [验证记录](docs/verification.md)
-- [发布流程](RELEASE.md)
-- [变更记录](CHANGELOG.md)
+
+## 许可证
+
+本项目采用 [Apache-2.0](LICENSE) 许可证。
